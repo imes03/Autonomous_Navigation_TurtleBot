@@ -1,0 +1,794 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from nav2_simple_commander.robot_navigator import BasicNavigator
+from nav2_simple_commander.robot_navigator import TaskResult
+
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import Point
+from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Twist
+
+from nav_msgs.msg import OccupancyGrid
+
+import numpy as np
+import math
+import random
+
+import tf2_ros
+from tf2_ros import TransformException
+
+
+class RRTNode:
+
+    def __init__(self, x, y, parent=None):
+
+        self.x = x
+        self.y = y
+        self.parent = parent
+
+
+class Explorer(Node):
+
+    def __init__(self):
+
+        super().__init__('explorer_node')
+
+        self.start_time = self.get_clock().now()
+
+        self.cmd_pub = self.create_publisher(
+            Twist,
+            '/cmd_vel',
+            10
+        )
+
+        # RRT TREE VISUALIZATION
+        self.rrt_marker_pub = self.create_publisher(
+            Marker,
+            '/rrt_tree',
+            10
+        )
+
+        # SELECTED GOAL VISUALIZATION
+        self.goal_marker_pub = self.create_publisher(
+            Marker,
+            '/rrt_goal',
+            10
+        )
+
+        self.tf_buffer = tf2_ros.Buffer()
+
+        self.tf_listener = tf2_ros.TransformListener(
+            self.tf_buffer,
+            self
+        )
+
+        self.navigator = BasicNavigator()
+
+        self.map_sub = self.create_subscription(
+            OccupancyGrid,
+            '/map',
+            self.map_callback,
+            10
+        )
+
+        self.map_data = None
+        self.map_info = None
+
+        self.timer = self.create_timer(
+            3.0,
+            self.explore
+        )
+
+        self.current_goal = None
+        self.exploring = False
+
+        self.failed_goals = []
+
+        # RRT PARAMETERS
+
+        self.rrt_iterations = 100
+
+        self.rrt_step_size = 1.3
+
+        self.frontier_search_radius = 2.0
+        
+        self.optimistic_distance = 3
+
+        self.get_logger().info(
+            'Debug: Explorer node started'
+        )
+
+    def map_callback(self, msg):
+
+        self.map_data = np.array(msg.data).reshape(
+            (msg.info.height, msg.info.width)
+        )
+
+        self.map_info = msg.info
+
+    def find_frontiers(self):
+
+        frontiers = []
+
+        for y in range(1, self.map_data.shape[0] - 1):
+
+            for x in range(1, self.map_data.shape[1] - 1):
+
+                if self.map_data[y][x] == 0:
+
+                    neighbors = [
+
+                        self.map_data[y+1][x],
+                        self.map_data[y-1][x],
+                        self.map_data[y][x+1],
+                        self.map_data[y][x-1]
+                    ]
+
+                    if -1 in neighbors:
+
+                        frontiers.append((x, y))
+
+        return frontiers
+
+    def grid_to_world(self, x, y):
+
+        wx = x * self.map_info.resolution + \
+            self.map_info.origin.position.x
+
+        wy = y * self.map_info.resolution + \
+            self.map_info.origin.position.y
+
+        return wx, wy
+
+    def world_to_grid(self, wx, wy):
+
+        gx = int(
+            (wx - self.map_info.origin.position.x)
+            / self.map_info.resolution
+        )
+
+        gy = int(
+            (wy - self.map_info.origin.position.y)
+            / self.map_info.resolution
+        )
+
+        return gx, gy
+
+    def get_robot_position(self):
+
+        try:
+
+            transform = self.tf_buffer.lookup_transform(
+                'map',
+                'base_link',
+                rclpy.time.Time()
+            )
+
+            x = transform.transform.translation.x
+
+            y = transform.transform.translation.y
+
+            return x, y
+
+        except TransformException:
+
+            return None
+
+    # FILTER FAILED FRONTIERS
+
+    def filter_failed_frontiers(self, frontiers):
+
+        filtered = []
+
+        for f in frontiers:
+
+            wx, wy = self.grid_to_world(f[0], f[1])
+
+            skip = False
+
+            for fg in self.failed_goals:
+
+                if math.hypot(
+                    wx - fg[0],
+                    wy - fg[1]
+                ) < 1.0:
+
+                    skip = True
+                    break
+
+            if not skip:
+
+                filtered.append(f)
+
+        return filtered
+
+    # CHECK FREE SPACE
+
+    def is_free(self, wx, wy):
+
+        if self.map_data is None:
+            return False
+
+        gx, gy = self.world_to_grid(wx, wy)
+
+        if gx < 0 or gy < 0:
+            return False
+
+        if gx >= self.map_data.shape[1]:
+            return False
+
+        if gy >= self.map_data.shape[0]:
+            return False
+
+        value = self.map_data[gy][gx]
+
+        # DEFINITELY FREE
+
+        if value == 0:
+            return True
+
+        # OCCUPIED
+
+        if value > 50:
+            return False
+
+        # OPTIMISTIC UNKNOWN EXPLORATION
+
+        if value == -1:
+
+            robot_pos = self.get_robot_position()
+
+            if robot_pos is None:
+                return False
+
+            rx, ry = robot_pos
+
+            dist = math.hypot(
+                wx - rx,
+                wy - ry
+            )
+
+            # allow nearby unknown space
+            if dist < self.optimistic_distance:
+
+                return True
+
+        return False
+
+    # RANDOM SAMPLE
+
+    def sample_random_point(self):
+
+        width = self.map_data.shape[1]
+
+        height = self.map_data.shape[0]
+
+        while True:
+
+            gx = random.randint(0, width - 1)
+
+            gy = random.randint(0, height - 1)
+
+            cell = self.map_data[gy][gx]
+
+            if cell == 0 or cell == -1:
+
+                wx, wy = self.grid_to_world(gx, gy)
+
+                return wx, wy
+
+    # NEAREST TREE NODE
+
+    def nearest_node(self, tree, rand_x, rand_y):
+
+        nearest = tree[0]
+
+        min_dist = float('inf')
+
+        for node in tree:
+
+            dist = math.hypot(
+                rand_x - node.x,
+                rand_y - node.y
+            )
+
+            if dist < min_dist:
+
+                min_dist = dist
+
+                nearest = node
+
+        return nearest
+
+    # STEER TOWARD RANDOM POINT
+
+    def steer(self, nearest, rand_x, rand_y):
+
+        theta = math.atan2(
+            rand_y - nearest.y,
+            rand_x - nearest.x
+        )
+
+        new_x = nearest.x + \
+            self.rrt_step_size * math.cos(theta)
+
+        new_y = nearest.y + \
+            self.rrt_step_size * math.sin(theta)
+
+        return RRTNode(
+            new_x,
+            new_y,
+            nearest
+        )
+
+    # COLLISION CHECK
+
+    def collision_free(self, node):
+
+        return self.is_free(
+            node.x,
+            node.y
+        )
+
+    # FRONTIER CHECK
+
+    def is_frontier_point(self, wx, wy):
+
+        gx, gy = self.world_to_grid(wx, wy)
+
+        if gx <= 0 or gy <= 0:
+            return False
+
+        if gx >= self.map_data.shape[1] - 1:
+            return False
+
+        if gy >= self.map_data.shape[0] - 1:
+            return False
+
+        if self.map_data[gy][gx] != 0:
+            return False
+
+        neighbors = [
+
+            self.map_data[gy+1][gx],
+            self.map_data[gy-1][gx],
+            self.map_data[gy][gx+1],
+            self.map_data[gy][gx-1]
+        ]
+
+        return -1 in neighbors
+
+    # INFORMATION GAIN
+
+    def information_gain(self, wx, wy):
+
+        gx, gy = self.world_to_grid(wx, wy)
+
+        radius_cells = int(
+            self.frontier_search_radius /
+            self.map_info.resolution
+        )
+
+        unknown_count = 0
+
+        for dy in range(-radius_cells, radius_cells):
+
+            for dx in range(-radius_cells, radius_cells):
+
+                nx = gx + dx
+                ny = gy + dy
+
+                if nx < 0 or ny < 0:
+                    continue
+
+                if nx >= self.map_data.shape[1]:
+                    continue
+
+                if ny >= self.map_data.shape[0]:
+                    continue
+
+                if self.map_data[ny][nx] == -1:
+
+                    unknown_count += 1
+
+        return unknown_count
+
+    # PUBLISH RRT TREE
+
+    def publish_rrt_tree(self, tree):
+
+        marker = Marker()
+
+        marker.header.frame_id = 'map'
+
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'rrt_tree'
+
+        marker.id = 0
+
+        marker.type = Marker.LINE_LIST
+
+        marker.action = Marker.ADD
+
+        marker.scale.x = 0.03
+
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        for node in tree:
+
+            if node.parent is None:
+                continue
+
+            p1 = Point()
+            p1.x = node.x
+            p1.y = node.y
+            p1.z = 0.0
+
+            p2 = Point()
+            p2.x = node.parent.x
+            p2.y = node.parent.y
+            p2.z = 0.0
+
+            marker.points.append(p1)
+            marker.points.append(p2)
+
+        self.rrt_marker_pub.publish(marker)
+
+    # PUBLISH SELECTED GOAL
+
+    def publish_goal_marker(self, x, y):
+
+        marker = Marker()
+
+        marker.header.frame_id = 'map'
+
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'goal'
+
+        marker.id = 1
+
+        marker.type = Marker.SPHERE
+
+        marker.action = Marker.ADD
+
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        marker.pose.position.z = 0.0
+
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.25
+        marker.scale.y = 0.25
+        marker.scale.z = 0.25
+
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        self.goal_marker_pub.publish(marker)
+
+    # SMART RRT FRONTIER SELECTION
+
+    def select_rrt_frontier(self):
+
+        robot_pos = self.get_robot_position()
+
+        if robot_pos is None:
+            return None
+
+        rx, ry = robot_pos
+
+        root = RRTNode(rx, ry)
+
+        tree = [root]
+
+        candidates = []
+
+        self.get_logger().info(
+            'Running smart RRT exploration'
+        )
+
+        for i in range(self.rrt_iterations):
+
+            rand_x, rand_y = self.sample_random_point()
+
+            nearest = self.nearest_node(
+                tree,
+                rand_x,
+                rand_y
+            )
+
+            new_node = self.steer(
+                nearest,
+                rand_x,
+                rand_y
+            )
+
+            if not self.collision_free(new_node):
+                continue
+
+            tree.append(new_node)
+
+            if i % 10 == 0:
+
+                self.publish_rrt_tree(tree)
+
+            gain = self.information_gain(
+                new_node.x,
+                new_node.y
+            )
+
+            distance = math.hypot(
+                new_node.x - rx,
+                new_node.y - ry
+            )
+
+            # encourage deep exploration
+            score = gain + (distance * 2.0)
+
+            # ignore useless nodes
+            if gain > 5:
+
+                candidates.append((
+                    score,
+                    gain,
+                    distance,
+                    new_node.x,
+                    new_node.y
+                ))
+
+        if len(candidates) == 0:
+
+            self.get_logger().warn(
+                'No frontier candidates found'
+            )
+
+            return None
+
+        candidates.sort(
+            key=lambda c: c[0],
+            reverse=True
+        )
+
+        best = candidates[0]
+
+        best_x = best[3]
+        best_y = best[4]
+
+        self.get_logger().info(
+            f'Selected frontier: '
+            f'({best_x:.2f}, {best_y:.2f}) '
+            f'gain={best[1]} '
+            f'distance={best[2]:.2f} '
+            f'score={best[0]:.2f}'
+        )
+
+        self.publish_goal_marker(
+            best_x,
+            best_y
+        )
+
+        return (
+            best_x,
+            best_y
+        )
+
+    def send_goal(self, x, y):
+
+        goal = PoseStamped()
+
+        goal.header.frame_id = 'map'
+
+        goal.header.stamp = self.get_clock().now().to_msg()
+
+        goal.pose.position.x = x
+
+        goal.pose.position.y = y
+
+        goal.pose.orientation.w = 1.0
+
+        self.navigator.goToPose(goal)
+
+        self.current_goal = (x, y)
+
+        self.exploring = True
+
+        self.get_logger().info(
+            f'New goal: {x:.2f}, {y:.2f}'
+        )
+
+    def explore(self):
+
+        if self.map_data is None:
+            return
+
+        # BOOTSTRAP MODE
+
+        if not self.map_is_ready():
+
+            self.get_logger().info(
+                'Bootstrapping SLAM...'
+            )
+
+            twist = Twist()
+
+            twist.linear.x = 0.1
+
+            twist.angular.z = 0.3
+
+            self.cmd_pub.publish(twist)
+
+            return
+
+        elapsed = (
+            self.get_clock().now() - self.start_time
+        ).nanoseconds / 1e9
+
+        if elapsed < 10.0:
+
+            self.get_logger().info(
+                'Waiting before starting exploration...'
+            )
+
+            return
+
+        self.cmd_pub.publish(Twist())
+
+
+        # NAVIGATION STATE MACHINE
+
+        if self.exploring:
+
+            if not self.navigator.isTaskComplete():
+
+                self.get_logger().info(
+                    'Robot navigating to current frontier...'
+                )
+
+                return
+
+            result = self.navigator.getResult()
+
+            if result == TaskResult.SUCCEEDED:
+
+                self.get_logger().info(
+                    'Goal achieved! Frontier reached'
+                )
+
+                self.current_goal = None
+
+                self.exploring = False
+
+                # OPTIONAL:
+                # rotate to improve SLAM scan coverage
+                rotate_twist = Twist()
+
+                rotate_twist.angular.z = 0.3
+
+                self.cmd_pub.publish(rotate_twist)
+
+                rclpy.spin_once(self, timeout_sec=0.5)
+
+                self.cmd_pub.publish(Twist())
+
+            elif result == TaskResult.FAILED:
+
+                self.get_logger().warn(
+                    'Goal failed, marking as bad'
+                )
+
+                if self.current_goal:
+
+                    self.failed_goals.append(
+                        self.current_goal
+                    )
+
+                self.current_goal = None
+
+                self.exploring= False
+
+            elif result == TaskResult.CANCELED:
+
+                self.get_logger().warn(
+                    'Goal canceled'
+                )
+
+                self.current_goal = None
+
+                self.exploring = False
+
+
+
+
+
+        frontiers = self.find_frontiers()
+
+        if len(frontiers) < 5:
+
+            self.get_logger().info(
+                'Not enough frontiers yet...'
+            )
+
+            return
+
+        if not frontiers:
+
+            self.get_logger().info(
+                'Exploration complete!'
+            )
+
+            return
+
+        frontiers = self.filter_failed_frontiers(
+            frontiers
+        )
+
+        if not frontiers:
+
+            self.get_logger().warn(
+                'No valid frontiers left'
+            )
+
+            return
+
+        # SMART RRT FRONTIER SELECTION
+
+        best = self.select_rrt_frontier()
+
+        if best is None:
+            return
+
+        # AVOID RESENDING SAME GOAL
+
+        if self.current_goal:
+
+            dist = math.hypot(
+                best[0] - self.current_goal[0],
+                best[1] - self.current_goal[1]
+            )
+
+            if dist < 0.5:
+                return
+
+        self.send_goal(best[0], best[1])
+
+    def map_is_ready(self):
+
+        if self.map_data is None:
+            return False
+
+        known = np.count_nonzero(
+            self.map_data != -1
+        )
+
+        total = self.map_data.size
+
+        if total == 0:
+            return False
+
+        return (known / total) > 0.01
+
+
+def main(args=None):
+
+    rclpy.init(args=args)
+
+    node = Explorer()
+
+    rclpy.spin(node)
+
+    node.destroy_node()
+
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
