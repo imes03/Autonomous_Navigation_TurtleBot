@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'explorer_node = autonomous_tb3.explorer_node:main',
+            'camera_viewer = autonomous_tb3.camera_viewer:main',
             'occupancy_grid_pub = autonomous_tb3.occupancy_grid_pub:main' ,
             'sdf_spawner = autonomous_tb3.spawn_entity:main' ,
             'maze_solver= autonomous_tb3.maze_solver:main' 
