@@ -9,10 +9,9 @@ setup(
     version='0.0.0',
     packages=find_packages(exclude=['test']),
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
+        ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/urdf', ['urdf/turtlebot3_burger.urdf']),       #ACW: Added for using new URDF with camera
+        ('share/' + package_name + '/urdf', ['urdf/turtlebot3_burger.urdf', 'urdf/turtlebot3_burger_cam.urdf']),       #ACW: Added for using new URDF with camera
 #        (os.path.join('share', package_name, 'meshes'), glob('meshes/*')),          #ACW: Added for using new URDF with camera
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'meshes', 'bases'), glob('meshes/bases/*')),  #ACW: Added for using new URDF with camera
@@ -33,6 +32,8 @@ setup(
     entry_points={
         'console_scripts': [
             'explorer_node = autonomous_tb3.explorer_node:main',
+            'apriltag_overlay = autonomous_tb3.apriltag_overlay:main',
+            'apriltag_text_marker = autonomous_tb3.apriltag_text_marker:main',
             'camera_viewer = autonomous_tb3.camera_viewer:main',
             'occupancy_grid_pub = autonomous_tb3.occupancy_grid_pub:main' ,
             'sdf_spawner = autonomous_tb3.spawn_entity:main' ,

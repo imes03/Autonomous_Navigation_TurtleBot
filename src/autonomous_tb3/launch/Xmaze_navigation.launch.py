@@ -75,18 +75,33 @@ def generate_launch_description():
 #            'x_pose': x_pose, 'y_pose': y_pose, 'spawn_type': 'overwrite'
 #        }.items()
 #    )
-    spawn_turtlebot = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(
-                get_package_share_directory('turtlebot3_gazebo'),
-                'launch',
-                'spawn_turtlebot3.launch.py'
-            )
-        ),
-        launch_arguments={
-            'x_pose': x_pose,
-            'y_pose': y_pose
-        }.items()
+
+
+#    spawn_turtlebot = IncludeLaunchDescription(
+#        PythonLaunchDescriptionSource(
+#            os.path.join(
+#                get_package_share_directory('turtlebot3_gazebo'),
+#                'launch',
+#                'spawn_turtlebot3.launch.py'
+#            )
+#        ),
+#        launch_arguments={
+#            'x_pose': x_pose,
+#            'y_pose': y_pose
+#        }.items()
+#    )
+
+    spawn_entity = Node(
+        package='gazebo_ros',
+        executable='spawn_entity.py',
+        arguments=[
+            '-entity', 'tb3',
+            '-topic', 'robot_description',
+            '-x', '-9.0',
+            '-y', '8.0',
+            '-z', '0.01'
+        ],
+        output='screen'
     )
    
     maze_spawner=Node(
@@ -99,14 +114,14 @@ def generate_launch_description():
 
 
  #   robot_description = {
- #       'robot_description': Command([
+  #      'robot_description': Command([
  #           'xacro ',
  #           os.path.join(
  #               get_package_share_directory('turtlebot3_description'),
  #               'urdf',
  #               'turtlebot3_burger_cam.urdf'     #URDF imes03@myPC:~/ros2_turtlebot3/ws_slam/src/turtlebot3/turtlebot3_description/urdf$ 
- #
- #          )
+#
+ #           )
  #       ]),
  #       'use_sim_time': True
  #   }
@@ -219,10 +234,12 @@ def generate_launch_description():
     ld.add_action(gzserver_cmd)
     ld.add_action(gzclient_cmd)
     ld.add_action(robot_state_publisher)       #ACW -> removed to use modified URDF with camera
-    ld.add_action(spawn_turtlebot)             #ACW -> removed to use modified URDF with camera
+    ld.add_action(spawn_entity)   
+#    ld.add_action(spawn_turtlebot)             #ACW -> removed to use modified URDF with camera
 #    ld.add_action(robot_description_publisher)      #ACW -> Added to use modified URDF with camera
     ld.add_action(maze_spawner_delayed)
-#    ld.add_action(spawn_after_gazebo)               #ACW               
+#    ld.add_action(spawn_after_gazebo)               #ACW 
+           
     ld.add_action(maze_mapping)                     #ACW: this command enable/disable mapping
     ld.add_action(maze_nav)                         #ACW: executed before rviz
     ld.add_action(rviz)   

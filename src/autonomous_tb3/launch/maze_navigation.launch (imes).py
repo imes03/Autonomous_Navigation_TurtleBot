@@ -99,14 +99,14 @@ def generate_launch_description():
 
 
  #   robot_description = {
- #       'robot_description': Command([
+  #      'robot_description': Command([
  #           'xacro ',
  #           os.path.join(
  #               get_package_share_directory('turtlebot3_description'),
  #               'urdf',
  #               'turtlebot3_burger_cam.urdf'     #URDF imes03@myPC:~/ros2_turtlebot3/ws_slam/src/turtlebot3/turtlebot3_description/urdf$ 
- #
- #          )
+#
+ #           )
  #       ]),
  #       'use_sim_time': True
  #   }

@@ -545,13 +545,6 @@ class Explorer(Node):
             # ignore useless nodes
             if gain > 5:
 
-                # Reject frontier goals near walls
-                if not self.has_clearance(
-                        new_node.x,
-                        new_node.y,
-                        radius=0.7):
-                    continue
-
                 candidates.append((
                     score,
                     gain,
