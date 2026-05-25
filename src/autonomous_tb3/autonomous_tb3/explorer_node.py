@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator
 from nav2_simple_commander.robot_navigator import TaskResult
+from apriltag_msgs.msg import AprilTagDetectionArray
 
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
@@ -62,10 +63,17 @@ class Explorer(Node):
         )
 
         self.navigator = BasicNavigator()
+
         self.map_sub = self.create_subscription(
             OccupancyGrid,
             '/map',
             self.map_callback,
+            10
+        )
+        self.tag_sub = self.create_subscription(
+            AprilTagDetectionArray,
+            '/detections',
+            self.tag_callback,
             10
         )
 
@@ -79,6 +87,12 @@ class Explorer(Node):
         self.current_goal = None
         self.exploring = False
         self.failed_goals = []
+
+        # Apriltag 
+        self.tag_detected = False
+        self.tag_goal_sent = False
+        self.tag_position = None
+        self.mission_complete = False
 
         # RRT PARAMETERS
         self.rrt_iterations = 100
@@ -96,6 +110,52 @@ class Explorer(Node):
         )
 
         self.map_info = msg.info
+
+    def tag_callback(self, msg):
+
+        if len(msg.detections) == 0:
+            return
+
+        # FIRST TAG ONLY
+        detection = msg.detections[0]
+        tag_id = detection.id
+
+        self.get_logger().info(
+            'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
+        )
+
+        try:
+
+            transform = self.tf_buffer.lookup_transform(
+                'map',
+                'tag36h11:0',
+                rclpy.time.Time()
+            )
+
+            tx = transform.transform.translation.x
+            ty = transform.transform.translation.y
+
+            self.tag_position = (tx, ty)
+
+            if not self.mission_complete:
+
+                self.tag_detected = True
+
+                self.mission_complete = True
+
+                self.get_logger().info(
+                    '>>>>>>>>>>>>>>>>>>>>>EXIT DETECTED!<<<<<<<<<<<<<<<<<<<<<<<'
+                )
+
+                self.navigator.cancelTask()
+
+                self.cmd_pub.publish(Twist())
+
+        except TransformException:
+
+            self.get_logger().warn(
+                'Tag TF not available yet'
+            )
 
     def find_frontiers(self):
 
@@ -203,9 +263,12 @@ class Explorer(Node):
     # CHECK FREE SPACE
 
     def is_free(self, wx, wy):
-
         if self.map_data is None:
             return False
+        
+        if self.mission_complete:
+            self.cmd_pub.publish(Twist())
+            return
 
         gx, gy = self.world_to_grid(wx, wy)
 
@@ -646,6 +709,56 @@ class Explorer(Node):
             return
 
         self.cmd_pub.publish(Twist())
+       # APRILTAG MODE
+
+        if self.tag_detected:
+
+            if self.tag_goal_sent:
+                return
+
+            self.get_logger().info(
+                'Stopping exploration and approaching tag'
+            )
+
+            # cancel current exploration goal
+            self.navigator.cancelTask()
+
+            self.exploring = False
+
+            tx, ty = self.tag_position
+
+            # robot should stop BEFORE tag
+            approach_distance = 0.8
+
+            robot_pos = self.get_robot_position()
+
+            if robot_pos is None:
+                return
+
+            rx, ry = robot_pos
+
+            dx = tx - rx
+            dy = ty - ry
+
+            dist = math.hypot(dx, dy)
+
+            if dist == 0:
+                return
+
+            ux = dx / dist
+            uy = dy / dist
+
+            goal_x = tx - ux * approach_distance
+            goal_y = ty - uy * approach_distance
+
+            self.send_goal(
+                goal_x,
+                goal_y
+            )
+
+            self.tag_goal_sent = True
+
+            return
 
 
         # NAVIGATION STATE MACHINE
@@ -702,6 +815,7 @@ class Explorer(Node):
                 self.current_goal = None
                 self.exploring = False
 
+ 
         frontiers = self.find_frontiers()
 
         if len(frontiers) < 5:

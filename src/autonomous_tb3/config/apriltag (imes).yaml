@@ -9,10 +9,6 @@
 
     max_hamming: 0
 
-    pose_estimation_method: "pnp"
-
-    publish_tf: true
-
     detector:
       threads: 2
       decimate: 0.5
