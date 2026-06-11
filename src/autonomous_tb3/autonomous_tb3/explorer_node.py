@@ -5,6 +5,7 @@ from rclpy.node import Node
 from nav2_simple_commander.robot_navigator import BasicNavigator
 from nav2_simple_commander.robot_navigator import TaskResult
 from apriltag_msgs.msg import AprilTagDetectionArray
+from rclpy.duration import Duration
 
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
@@ -91,9 +92,12 @@ class Explorer(Node):
         # Apriltag 
         self.tag_detected = False
         self.tag_goal_sent = False
+        self.approaching_tag = False
         self.tag_position = None
         self.mission_complete = False
-
+        self.saved_goal_x = None
+        self.saved_goal_y = None
+        self.saved_goal_yaw = None
         # RRT PARAMETERS
         self.rrt_iterations = 100
         self.rrt_step_size = 1.3
@@ -115,7 +119,9 @@ class Explorer(Node):
 
         if len(msg.detections) == 0:
             return
-
+        # SAVE ONLY FIRST DETECTION
+        if self.tag_detected:
+            return
         # FIRST TAG ONLY
         detection = msg.detections[0]
         tag_id = detection.id
@@ -126,6 +132,19 @@ class Explorer(Node):
 
         try:
 
+            if not self.tf_buffer.can_transform(
+                'map',
+                'tag36h11:0',
+                rclpy.time.Time(),
+                timeout=Duration(seconds=1.0)
+            ):
+
+                self.get_logger().warn(
+                    'Tag TF not available yet'
+                )
+
+                return
+
             transform = self.tf_buffer.lookup_transform(
                 'map',
                 'tag36h11:0',
@@ -134,22 +153,66 @@ class Explorer(Node):
 
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
+            robot_pos = self.get_robot_position()
 
+            if robot_pos is None:
+                return
+
+            rx, ry = robot_pos
+
+            # ROBOT -> TAG VECTOR
+            dx = tx - rx
+            dy = ty - ry
+
+            distance = math.hypot(dx, dy)
+
+            if distance == 0:
+                return
+
+            ux = dx / distance
+            uy = dy / distance
+
+            # STOP BEFORE TAG
+            approach_distance = 0.8
+
+            goal_x = tx - ux * approach_distance
+            goal_y = ty - uy * approach_distance
+            self.get_logger().info(
+            f"""
+            ROBOT ({rx:.2f},{ry:.2f})
+            TAG ({tx:.2f},{ty:.2f})
+            GOAL ({goal_x:.2f},{goal_y:.2f})
+            """
+            )
+            goal_yaw = math.atan2(dy, dx)
+
+            # SAVE FROZEN GOAL
+            self.saved_goal_x = goal_x
+            self.saved_goal_y = goal_y
+            self.saved_goal_yaw = goal_yaw
+
+            self.tag_position = (tx, ty)
+
+            self.tag_detected = True
+
+            self.get_logger().info(
+                f'Saved exit goal: ({goal_x:.2f}, {goal_y:.2f})'
+            )
             self.tag_position = (tx, ty)
 
             if not self.mission_complete:
 
                 self.tag_detected = True
 
-                self.mission_complete = True
-
-                self.get_logger().info(
-                    '>>>>>>>>>>>>>>>>>>>>>EXIT DETECTED!<<<<<<<<<<<<<<<<<<<<<<<'
-                )
-
-                self.navigator.cancelTask()
-
-                self.cmd_pub.publish(Twist())
+#                self.mission_complete = True
+#
+ #               self.get_logger().info(
+#                    '>>>>>>>>>>>>>>>>>>>>>EXIT ACHIEVED!<<<<<<<<<<<<<<<<<<<<<<<'
+#                )
+#
+#                self.navigator.cancelTask()
+#
+ #               self.cmd_pub.publish(Twist())
 
         except TransformException:
 
@@ -659,7 +722,7 @@ class Explorer(Node):
             best_y
         )
 
-    def send_goal(self, x, y):
+    def send_goal(self, x, y, yaw=0.0):
 
         goal = PoseStamped()
 
@@ -667,7 +730,8 @@ class Explorer(Node):
         goal.header.stamp = self.get_clock().now().to_msg()
         goal.pose.position.x = x
         goal.pose.position.y = y
-        goal.pose.orientation.w = 1.0
+        goal.pose.orientation.z = math.sin(yaw / 2.0)
+        goal.pose.orientation.w = math.cos(yaw / 2.0) 
         self.navigator.goToPose(goal)
         self.current_goal = (x, y)
         self.exploring = True
@@ -680,7 +744,11 @@ class Explorer(Node):
 
         if self.map_data is None:
             return
-
+        
+        if self.mission_complete:
+            self.cmd_pub.publish(Twist())
+            return
+        
         # BOOTSTRAP MODE
 
         if not self.map_is_ready():
@@ -709,57 +777,58 @@ class Explorer(Node):
             return
 
         self.cmd_pub.publish(Twist())
-       # APRILTAG MODE
+
+        # APRILTAG MODE
 
         if self.tag_detected:
 
-            if self.tag_goal_sent:
+            # FIRST TIME ONLY
+            if not self.tag_goal_sent:
+
+                self.get_logger().info(
+                    'Tag detected -> navigating to exit'
+                )
+
+                self.navigator.cancelTask()
+
+                self.exploring = False
+
+                self.send_goal(
+                    self.saved_goal_x,
+                    self.saved_goal_y,
+                    self.saved_goal_yaw
+                )
+
+                self.tag_goal_sent = True
+                self.approaching_tag = True
+
                 return
 
-            self.get_logger().info(
-                'Stopping exploration and approaching tag'
-            )
+            # WAIT UNTIL TAG GOAL COMPLETE
+            if self.approaching_tag:
 
-            # cancel current exploration goal
-            self.navigator.cancelTask()
+                if not self.navigator.isTaskComplete():
 
-            self.exploring = False
+                    self.get_logger().info(
+                        '<<<<<<<<<EXIT DETECTED >>  Approaching exit tag...>>>>>>>>>>>>>'
+                    )
 
-            tx, ty = self.tag_position
+                    return
 
-            # robot should stop BEFORE tag
-            approach_distance = 0.8
+                result = self.navigator.getResult()
 
-            robot_pos = self.get_robot_position()
+                if result == TaskResult.SUCCEEDED:
 
-            if robot_pos is None:
-                return
+                    self.get_logger().info(
+                        '>>>>>>>>>>>>>>>>>>>>>>>>>>>>EXIT SUCCEEDED!<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'
+                    )
 
-            rx, ry = robot_pos
+                    self.cmd_pub.publish(Twist())
 
-            dx = tx - rx
-            dy = ty - ry
+                    self.mission_complete = True
+                    self.approaching_tag = False
 
-            dist = math.hypot(dx, dy)
-
-            if dist == 0:
-                return
-
-            ux = dx / dist
-            uy = dy / dist
-
-            goal_x = tx - ux * approach_distance
-            goal_y = ty - uy * approach_distance
-
-            self.send_goal(
-                goal_x,
-                goal_y
-            )
-
-            self.tag_goal_sent = True
-
-            return
-
+                    return
 
         # NAVIGATION STATE MACHINE
 
@@ -870,7 +939,7 @@ class Explorer(Node):
 
         if self.map_data is None:
             return False
-
+        
         known = np.count_nonzero(
             self.map_data != -1
         )
