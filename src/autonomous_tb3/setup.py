@@ -19,6 +19,7 @@ setup(
         (os.path.join('share', package_name, 'meshes', 'sensors'), glob('meshes/sensors/*')),#ACW: Added for using new URDF with camera
         (os.path.join('share',package_name,'config') , glob('config/*')),
         (os.path.join('share', 'autonomous_tb3', 'world/maze'), glob('world/maze/*')),
+	(os.path.join('share', 'autonomous_tb3', 'world/small_maze'), glob('world/small_maze/*')),
         
             ],
 

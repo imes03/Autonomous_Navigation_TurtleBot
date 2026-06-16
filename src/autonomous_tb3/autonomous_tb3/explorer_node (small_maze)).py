@@ -128,7 +128,7 @@ class Explorer(Node):
         tag_id = detection.id
 
         self.get_logger().info(
-            f'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
+            'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
         )
 
         try:
@@ -152,46 +152,42 @@ class Explorer(Node):
                 rclpy.time.Time()
             )
 
-            # TAG POSITION
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
+            robot_pos = self.get_robot_position()
 
-            # TAG ORIENTATION
-            q = transform.transform.rotation
+            if robot_pos is None:
+                return
 
-            yaw = math.atan2(
-                2.0*(q.w*q.z + q.x*q.y),
-                1.0 - 2.0*(q.y*q.y + q.z*q.z)
-            )
-            self.get_logger().info(
-                f"TAG X={tx:.2f}, Y={ty:.2f}"
-            )
+            rx, ry = robot_pos
 
-            self.get_logger().info(
-                f"TAG YAW={math.degrees(yaw):.1f} deg"
-            )
+            # ROBOT -> TAG VECTOR
+            dx = tx - rx
+            dy = ty - ry
 
-            approach_distance = 0.20
+            distance = math.hypot(dx, dy)
 
-            # Goal 20 cm in front of tag
-            goal_x = tx - approach_distance * math.cos(yaw)
-            goal_y = ty - approach_distance * math.sin(yaw)
+            if distance == 0:
+                return
 
-            # Robot orientation at final position
-            goal_yaw = yaw + math.pi
-            self.get_logger().info(
-                f"TAG YAW = {math.degrees(yaw):.1f}"
-            )
+            ux = dx / distance
+            uy = dy / distance
+
+            # STOP BEFORE TAG
+            approach_distance = 0.8
+
+            goal_x = tx - ux * approach_distance
+            goal_y = ty - uy * approach_distance
             self.get_logger().info(
             f"""
+            ROBOT ({rx:.2f},{ry:.2f})
             TAG ({tx:.2f},{ty:.2f})
-            TAG YAW = {math.degrees(yaw):.1f}
             GOAL ({goal_x:.2f},{goal_y:.2f})
             """
             )
-           
-           
-                       # SAVE FROZEN GOAL
+            goal_yaw = math.atan2(dy, dx)
+
+            # SAVE FROZEN GOAL
             self.saved_goal_x = goal_x
             self.saved_goal_y = goal_y
             self.saved_goal_yaw = goal_yaw
@@ -856,12 +852,7 @@ class Explorer(Node):
 
                 if not self.navigator.isTaskComplete():
 
-                    robot_pos = self.get_robot_position()
-
-                    if robot_pos is None:
-                        return
-
-                    rx, ry = robot_pos
+                    rx, ry = self.get_robot_position()
 
                     if not self.has_clearance(rx, ry, radius=0.25):
 
@@ -879,8 +870,8 @@ class Explorer(Node):
                                 self.current_goal[0],
                                 self.current_goal[1]
                             )
-
-                    # ALWAYS obtain feedback here
+                    return
+                
                     feedback = self.navigator.getFeedback()
 
                     if feedback is not None:
@@ -896,12 +887,13 @@ class Explorer(Node):
                             )
 
                     self.get_logger().info(
-                        '2. Robot navigating to tag...'
+                        '2. Robot navigating to current frontier...'
                     )
 
                     return
-                
+
                 result = self.navigator.getResult()
+
                 if result == TaskResult.SUCCEEDED:
 
                     self.get_logger().info(
@@ -912,23 +904,7 @@ class Explorer(Node):
 
                     self.mission_complete = True
                     self.approaching_tag = False
-                elif result == TaskResult.FAILED:
 
-                    self.get_logger().warn(
-                        'Tag goal failed'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
-
-                elif result == TaskResult.CANCELED:
-
-                    self.get_logger().warn(
-                        'Tag goal canceled'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
                     return
 
         # NAVIGATION STATE MACHINE
@@ -937,43 +913,17 @@ class Explorer(Node):
 
             if not self.navigator.isTaskComplete():
 
-                robot_pos = self.get_robot_position()
-
-                if robot_pos is None:
-                    return
-
-                rx, ry = robot_pos
-
-                if not self.has_clearance(rx, ry, radius=0.25):
-
-                    self.get_logger().warn(
-                        'Too close to wall -> replanning'
-                    )
-
-                    self.navigator.cancelTask()
-
-                    self.exploring = False
-
-                    if self.current_goal:
-
-                        self.send_goal(
-                            self.current_goal[0],
-                            self.current_goal[1]
-                        )
-
                 feedback = self.navigator.getFeedback()
 
                 if feedback is not None:
 
                     self.get_logger().info(
-                        f"Distance remaining: {feedback.distance_remaining:.2f}"
+                        f"Distance remaining = {feedback.distance_remaining:.2f}"
                     )
 
-                    if feedback.distance_remaining < 0.05:
-
-                        self.get_logger().info(
-                            "Almost at tag"
-                        )
+                    self.get_logger().info(
+                        f"Navigation time={feedback.navigation_time.sec}"
+                    )
 
                 self.get_logger().info(
                     '1. Robot navigating to current frontier...'

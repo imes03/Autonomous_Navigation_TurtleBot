@@ -88,7 +88,6 @@ class Explorer(Node):
         self.current_goal = None
         self.exploring = False
         self.failed_goals = []
-        self.last_goal = None
 
         # Apriltag 
         self.tag_detected = False
@@ -100,8 +99,8 @@ class Explorer(Node):
         self.saved_goal_y = None
         self.saved_goal_yaw = None
         # RRT PARAMETERS
-        self.rrt_iterations = 500
-        self.rrt_step_size = 0.6                    #small maze
+        self.rrt_iterations = 100
+        self.rrt_step_size = 1.9
         self.frontier_search_radius = 2.0        
         self.optimistic_distance = 3
         self.get_logger().info(
@@ -128,7 +127,7 @@ class Explorer(Node):
         tag_id = detection.id
 
         self.get_logger().info(
-            f'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
+            'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
         )
 
         try:
@@ -152,46 +151,42 @@ class Explorer(Node):
                 rclpy.time.Time()
             )
 
-            # TAG POSITION
             tx = transform.transform.translation.x
             ty = transform.transform.translation.y
+            robot_pos = self.get_robot_position()
 
-            # TAG ORIENTATION
-            q = transform.transform.rotation
+            if robot_pos is None:
+                return
 
-            yaw = math.atan2(
-                2.0*(q.w*q.z + q.x*q.y),
-                1.0 - 2.0*(q.y*q.y + q.z*q.z)
-            )
-            self.get_logger().info(
-                f"TAG X={tx:.2f}, Y={ty:.2f}"
-            )
+            rx, ry = robot_pos
 
-            self.get_logger().info(
-                f"TAG YAW={math.degrees(yaw):.1f} deg"
-            )
+            # ROBOT -> TAG VECTOR
+            dx = tx - rx
+            dy = ty - ry
 
-            approach_distance = 0.20
+            distance = math.hypot(dx, dy)
 
-            # Goal 20 cm in front of tag
-            goal_x = tx - approach_distance * math.cos(yaw)
-            goal_y = ty - approach_distance * math.sin(yaw)
+            if distance == 0:
+                return
 
-            # Robot orientation at final position
-            goal_yaw = yaw + math.pi
-            self.get_logger().info(
-                f"TAG YAW = {math.degrees(yaw):.1f}"
-            )
+            ux = dx / distance
+            uy = dy / distance
+
+            # STOP BEFORE TAG
+            approach_distance = 0.8
+
+            goal_x = tx - ux * approach_distance
+            goal_y = ty - uy * approach_distance
             self.get_logger().info(
             f"""
+            ROBOT ({rx:.2f},{ry:.2f})
             TAG ({tx:.2f},{ty:.2f})
-            TAG YAW = {math.degrees(yaw):.1f}
             GOAL ({goal_x:.2f},{goal_y:.2f})
             """
             )
-           
-           
-                       # SAVE FROZEN GOAL
+            goal_yaw = math.atan2(dy, dx)
+
+            # SAVE FROZEN GOAL
             self.saved_goal_x = goal_x
             self.saved_goal_y = goal_y
             self.saved_goal_yaw = goal_yaw
@@ -317,7 +312,7 @@ class Explorer(Node):
                 if math.hypot(
                     wx - fg[0],
                     wy - fg[1]
-                ) < 0.2:
+                ) < 1.0:
 
                     skip = True
                     break
@@ -509,15 +504,8 @@ class Explorer(Node):
             self.map_data[gy+1][gx],
             self.map_data[gy-1][gx],
             self.map_data[gy][gx+1],
-            self.map_data[gy][gx-1],
-
-            self.map_data[gy+1][gx+1],
-            self.map_data[gy+1][gx-1],
-            self.map_data[gy-1][gx+1],
-            self.map_data[gy-1][gx-1]
-
+            self.map_data[gy][gx-1]
         ]
-
 
         return -1 in neighbors
 
@@ -658,7 +646,7 @@ class Explorer(Node):
             if not self.has_clearance(
                     new_node.x,
                     new_node.y,
-                    radius=0.2):
+                    radius=0.5):
                 continue
 
             tree.append(new_node)
@@ -676,34 +664,18 @@ class Explorer(Node):
                 new_node.x - rx,
                 new_node.y - ry
             )
-            continuity_bonus = 0.0
-            if self.last_goal is not None:
-
-                d_last = math.hypot(
-                    new_node.x - self.last_goal[0],
-                    new_node.y - self.last_goal[1]
-                )
-
-                # premia candidatos próximos al objetivo anterior
-                continuity_bonus = max(0, 3.0 - d_last)
-         
 
             # Gain for deep exploration
-            score = gain + (distance * 0.2)     #changed in small maze to far frontiers
+            score = gain + (distance * 2.0)
 
             # ignore useless nodes
-            if gain > 10:
+            if gain > 5:
 
                 # Reject frontier goals near walls
                 if not self.has_clearance(
                         new_node.x,
                         new_node.y,
-                        radius=0.30):
-                    continue
-                # Must be an actual frontier
-                if not self.is_frontier_point(
-                        new_node.x,
-                        new_node.y):
+                        radius=0.7):
                     continue
 
                 candidates.append((
@@ -713,8 +685,6 @@ class Explorer(Node):
                     new_node.x,
                     new_node.y
                 ))
-                
-
 
         if len(candidates) == 0:
 
@@ -733,10 +703,6 @@ class Explorer(Node):
 
         best_x = best[3]
         best_y = best[4]
-        self.last_goal = (
-            best_x,
-            best_y
-        )
 
         self.get_logger().info(
             f'Selected frontier: '
@@ -755,19 +721,6 @@ class Explorer(Node):
             best_x,
             best_y
         )
-
-    def create_pose(self, x, y):
-
-        pose = PoseStamped()
-
-        pose.header.frame_id = "map"
-        pose.header.stamp = self.get_clock().now().to_msg()
-
-        pose.pose.position.x = x
-        pose.pose.position.y = y
-        pose.pose.orientation.w = 1.0
-
-        return pose
 
     def send_goal(self, x, y, yaw=0.0):
 
@@ -805,8 +758,8 @@ class Explorer(Node):
             )
 
             twist = Twist()
-            twist.linear.x = 0.07
-            twist.angular.z = 0.1
+            twist.linear.x = 0.1
+            twist.angular.z = 0.3
             self.cmd_pub.publish(twist)
 
             return
@@ -856,52 +809,14 @@ class Explorer(Node):
 
                 if not self.navigator.isTaskComplete():
 
-                    robot_pos = self.get_robot_position()
-
-                    if robot_pos is None:
-                        return
-
-                    rx, ry = robot_pos
-
-                    if not self.has_clearance(rx, ry, radius=0.25):
-
-                        self.get_logger().warn(
-                            'Too close to wall -> replanning'
-                        )
-
-                        self.navigator.cancelTask()
-
-                        self.exploring = False
-
-                        if self.current_goal:
-
-                            self.send_goal(
-                                self.current_goal[0],
-                                self.current_goal[1]
-                            )
-
-                    # ALWAYS obtain feedback here
-                    feedback = self.navigator.getFeedback()
-
-                    if feedback is not None:
-
-                        self.get_logger().info(
-                            f"Distance remaining: {feedback.distance_remaining:.2f}"
-                        )
-
-                        if feedback.distance_remaining < 0.05:
-
-                            self.get_logger().info(
-                                "Almost at tag"
-                            )
-
                     self.get_logger().info(
-                        '2. Robot navigating to tag...'
+                        '<<<<<<<<<EXIT DETECTED >>  Approaching exit tag...>>>>>>>>>>>>>'
                     )
 
                     return
-                
+
                 result = self.navigator.getResult()
+
                 if result == TaskResult.SUCCEEDED:
 
                     self.get_logger().info(
@@ -912,23 +827,7 @@ class Explorer(Node):
 
                     self.mission_complete = True
                     self.approaching_tag = False
-                elif result == TaskResult.FAILED:
 
-                    self.get_logger().warn(
-                        'Tag goal failed'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
-
-                elif result == TaskResult.CANCELED:
-
-                    self.get_logger().warn(
-                        'Tag goal canceled'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
                     return
 
         # NAVIGATION STATE MACHINE
@@ -936,47 +835,8 @@ class Explorer(Node):
         if self.exploring:
 
             if not self.navigator.isTaskComplete():
-
-                robot_pos = self.get_robot_position()
-
-                if robot_pos is None:
-                    return
-
-                rx, ry = robot_pos
-
-                if not self.has_clearance(rx, ry, radius=0.25):
-
-                    self.get_logger().warn(
-                        'Too close to wall -> replanning'
-                    )
-
-                    self.navigator.cancelTask()
-
-                    self.exploring = False
-
-                    if self.current_goal:
-
-                        self.send_goal(
-                            self.current_goal[0],
-                            self.current_goal[1]
-                        )
-
-                feedback = self.navigator.getFeedback()
-
-                if feedback is not None:
-
-                    self.get_logger().info(
-                        f"Distance remaining: {feedback.distance_remaining:.2f}"
-                    )
-
-                    if feedback.distance_remaining < 0.05:
-
-                        self.get_logger().info(
-                            "Almost at tag"
-                        )
-
                 self.get_logger().info(
-                    '1. Robot navigating to current frontier...'
+                    'Robot navigating to current frontier...'
                 )
 
                 return
@@ -1059,36 +919,10 @@ class Explorer(Node):
 
         best = self.select_rrt_frontier()
         if best is None:
-            return     
-   
-        robot_pos = self.get_robot_position()
-
-        if robot_pos is None:
             return
 
-        start = self.create_pose(
-            robot_pos[0],
-            robot_pos[1]
-        )
- 
-        goal = self.create_pose(
-            best[0],
-            best[1]
-        )
-
-        path = self.navigator.getPath(start, goal)
-
-        if path is None:
-
-            self.get_logger().warn(
-                "Nav2 cannot find a path to this frontier"
-            )
-
-            self.failed_goals.append(best)
-
-            return
-        
         # AVOID RESENDING SAME GOAL
+
         if self.current_goal:
 
             dist = math.hypot(
@@ -1097,10 +931,9 @@ class Explorer(Node):
             )
 
             if dist < 0.5:
-                return      
-        
-        self.send_goal(best[0], best[1])
+                return
 
+        self.send_goal(best[0], best[1])
 
     def map_is_ready(self):
 
