@@ -85,6 +85,12 @@ class Explorer(Node):
             3.0,
             self.explore
         )
+
+        self.visual_timer = self.create_timer(
+            0.1,
+            self.visual_servo
+        )
+        
         self.current_goal = None
         self.exploring = False
         self.failed_goals = []
@@ -92,6 +98,7 @@ class Explorer(Node):
 
         # Apriltag 
         self.tag_detected = False
+        self.tag_pending = False
         self.tag_goal_sent = False
         self.approaching_tag = False
         self.tag_position = None
@@ -99,6 +106,19 @@ class Explorer(Node):
         self.saved_goal_x = None
         self.saved_goal_y = None
         self.saved_goal_yaw = None
+        self.state = "EXPLORING"
+        self.tag_x = None
+        self.tag_y = None
+        self.tag_center_x = None
+        self.tag_size = None
+        self.tag_x = None
+        self.tag_y = None
+        self.desired_distance = 0.60
+        self.centered_tag = False
+        self.desired_distance = 0.40
+        self.tag_center_x = None
+        self.tag_size = None
+
         # RRT PARAMETERS
         self.rrt_iterations = 500
         self.rrt_step_size = 0.6                    #small maze
@@ -120,110 +140,72 @@ class Explorer(Node):
 
         if len(msg.detections) == 0:
             return
-        # SAVE ONLY FIRST DETECTION
-        if self.tag_detected:
-            return
-        # FIRST TAG ONLY
+
         detection = msg.detections[0]
+
+        self.tag_center_x = detection.centre.x
+
+        c = detection.corners
+
+        s1 = math.hypot(
+            c[0].x-c[1].x,
+            c[0].y-c[1].y
+        )
+
+        s2 = math.hypot(
+            c[1].x-c[2].x,
+            c[1].y-c[2].y
+        )
+
+        s3 = math.hypot(
+            c[2].x-c[3].x,
+            c[2].y-c[3].y
+        )
+
+        s4 = math.hypot(
+            c[3].x-c[0].x,
+            c[3].y-c[0].y
+        )
+
+        self.tag_size = (s1+s2+s3+s4)/4
+
+        try:
+
+            tf = self.tf_buffer.lookup_transform(
+                'base_link',
+                'tag36h11:0',
+                rclpy.time.Time()
+            )
+
+            self.tag_x = tf.transform.translation.x
+            self.tag_y = tf.transform.translation.y
+
+        except TransformException:
+            pass
+
+        
+
+        self.get_logger().info(
+            f"Tag center={self.tag_center_x:.1f} size={self.tag_size:.1f}"
+        )
         tag_id = detection.id
 
         self.get_logger().info(
             f'APRILTAG DETECTED! >>>>>>>>>>> Tag:   {tag_id}'
         )
 
-        try:
+        # STOP CURRENT NAVIGATION
+        if not self.tag_detected and not self.tag_pending:
 
-            if not self.tf_buffer.can_transform(
-                'map',
-                'tag36h11:0',
-                rclpy.time.Time(),
-                timeout=Duration(seconds=1.0)
-            ):
-
-                self.get_logger().warn(
-                    'Tag TF not available yet'
-                )
-
-                return
-
-            transform = self.tf_buffer.lookup_transform(
-                'map',
-                'tag36h11:0',
-                rclpy.time.Time()
-            )
-
-            # TAG POSITION
-            tx = transform.transform.translation.x
-            ty = transform.transform.translation.y
-
-            # TAG ORIENTATION
-            q = transform.transform.rotation
-
-            yaw = math.atan2(
-                2.0*(q.w*q.z + q.x*q.y),
-                1.0 - 2.0*(q.y*q.y + q.z*q.z)
-            )
-            self.get_logger().info(
-                f"TAG X={tx:.2f}, Y={ty:.2f}"
-            )
+            self.tag_pending = True
 
             self.get_logger().info(
-                f"TAG YAW={math.degrees(yaw):.1f} deg"
+                "AprilTag seen. Will finish current goal first."
             )
 
-            approach_distance = 0.20
 
-            # Goal 20 cm in front of tag
-            goal_x = tx - approach_distance * math.cos(yaw)
-            goal_y = ty - approach_distance * math.sin(yaw)
 
-            # Robot orientation at final position
-            goal_yaw = yaw + math.pi
-            self.get_logger().info(
-                f"TAG YAW = {math.degrees(yaw):.1f}"
-            )
-            self.get_logger().info(
-            f"""
-            TAG ({tx:.2f},{ty:.2f})
-            TAG YAW = {math.degrees(yaw):.1f}
-            GOAL ({goal_x:.2f},{goal_y:.2f})
-            """
-            )
-           
-           
-                       # SAVE FROZEN GOAL
-            self.saved_goal_x = goal_x
-            self.saved_goal_y = goal_y
-            self.saved_goal_yaw = goal_yaw
 
-            self.tag_position = (tx, ty)
-
-            self.tag_detected = True
-
-            self.get_logger().info(
-                f'Saved exit goal: ({goal_x:.2f}, {goal_y:.2f})'
-            )
-            self.tag_position = (tx, ty)
-
-            if not self.mission_complete:
-
-                self.tag_detected = True
-
-#                self.mission_complete = True
-#
- #               self.get_logger().info(
-#                    '>>>>>>>>>>>>>>>>>>>>>EXIT ACHIEVED!<<<<<<<<<<<<<<<<<<<<<<<'
-#                )
-#
-#                self.navigator.cancelTask()
-#
- #               self.cmd_pub.publish(Twist())
-
-        except TransformException:
-
-            self.get_logger().warn(
-                'Tag TF not available yet'
-            )
 
     def find_frontiers(self):
 
@@ -300,6 +282,7 @@ class Explorer(Node):
         except TransformException:
 
             return None
+
 
     # FILTER FAILED FRONTIERS
 
@@ -769,7 +752,7 @@ class Explorer(Node):
 
         return pose
 
-    def send_goal(self, x, y, yaw=0.0):
+    def send_goal(self, x, y, yaw=0.0, tag_goal=False):
 
         goal = PoseStamped()
 
@@ -779,25 +762,38 @@ class Explorer(Node):
         goal.pose.position.y = y
         goal.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.orientation.w = math.cos(yaw / 2.0) 
+
         self.navigator.goToPose(goal)
         self.current_goal = (x, y)
-        self.exploring = True
+
+        if not tag_goal:
+            self.exploring = True
 
         self.get_logger().info(
             f'New goal: {x:.2f}, {y:.2f}'
         )
 
     def explore(self):
+        
+        self.get_logger().info(
+            f"EXPLORE: mission={self.mission_complete} "
+            f"tag={self.tag_detected} "
+            f"pending={self.tag_pending} "
+            f"exploring={self.exploring}"
+        )
 
         if self.map_data is None:
             return
-        
+
         if self.mission_complete:
             self.cmd_pub.publish(Twist())
             return
-        
-        # BOOTSTRAP MODE
 
+        # Tag mode is handled by visual_servo()
+        if self.tag_detected:
+            return
+
+        # BOOTSTRAP MODE
         if not self.map_is_ready():
 
             self.get_logger().info(
@@ -825,113 +821,9 @@ class Explorer(Node):
 
         self.cmd_pub.publish(Twist())
 
-        # APRILTAG MODE
-
-        if self.tag_detected:
-
-            # FIRST TIME ONLY
-            if not self.tag_goal_sent:
-
-                self.get_logger().info(
-                    'Tag detected -> navigating to exit'
-                )
-
-                self.navigator.cancelTask()
-
-                self.exploring = False
-
-                self.send_goal(
-                    self.saved_goal_x,
-                    self.saved_goal_y,
-                    self.saved_goal_yaw
-                )
-
-                self.tag_goal_sent = True
-                self.approaching_tag = True
-
-                return
-
-            # WAIT UNTIL TAG GOAL COMPLETE
-            if self.approaching_tag:
-
-                if not self.navigator.isTaskComplete():
-
-                    robot_pos = self.get_robot_position()
-
-                    if robot_pos is None:
-                        return
-
-                    rx, ry = robot_pos
-
-                    if not self.has_clearance(rx, ry, radius=0.25):
-
-                        self.get_logger().warn(
-                            'Too close to wall -> replanning'
-                        )
-
-                        self.navigator.cancelTask()
-
-                        self.exploring = False
-
-                        if self.current_goal:
-
-                            self.send_goal(
-                                self.current_goal[0],
-                                self.current_goal[1]
-                            )
-
-                    # ALWAYS obtain feedback here
-                    feedback = self.navigator.getFeedback()
-
-                    if feedback is not None:
-
-                        self.get_logger().info(
-                            f"Distance remaining: {feedback.distance_remaining:.2f}"
-                        )
-
-                        if feedback.distance_remaining < 0.05:
-
-                            self.get_logger().info(
-                                "Almost at tag"
-                            )
-
-                    self.get_logger().info(
-                        '2. Robot navigating to tag...'
-                    )
-
-                    return
-                
-                result = self.navigator.getResult()
-                if result == TaskResult.SUCCEEDED:
-
-                    self.get_logger().info(
-                        '>>>>>>>>>>>>>>>>>>>>>>>>>>>>EXIT SUCCEEDED!<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'
-                    )
-
-                    self.cmd_pub.publish(Twist())
-
-                    self.mission_complete = True
-                    self.approaching_tag = False
-                elif result == TaskResult.FAILED:
-
-                    self.get_logger().warn(
-                        'Tag goal failed'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
-
-                elif result == TaskResult.CANCELED:
-
-                    self.get_logger().warn(
-                        'Tag goal canceled'
-                    )
-
-                    self.approaching_tag = False
-                    self.tag_goal_sent = False
-                    return
-
+        ####################################################
         # NAVIGATION STATE MACHINE
+        ####################################################
 
         if self.exploring:
 
@@ -947,19 +839,8 @@ class Explorer(Node):
                 if not self.has_clearance(rx, ry, radius=0.25):
 
                     self.get_logger().warn(
-                        'Too close to wall -> replanning'
+                        'Too close to wall'
                     )
-
-                    self.navigator.cancelTask()
-
-                    self.exploring = False
-
-                    if self.current_goal:
-
-                        self.send_goal(
-                            self.current_goal[0],
-                            self.current_goal[1]
-                        )
 
                 feedback = self.navigator.getFeedback()
 
@@ -969,12 +850,6 @@ class Explorer(Node):
                         f"Distance remaining: {feedback.distance_remaining:.2f}"
                     )
 
-                    if feedback.distance_remaining < 0.05:
-
-                        self.get_logger().info(
-                            "Almost at tag"
-                        )
-
                 self.get_logger().info(
                     '1. Robot navigating to current frontier...'
                 )
@@ -983,22 +858,50 @@ class Explorer(Node):
 
             result = self.navigator.getResult()
 
+            ################################################
+            # GOAL REACHED
+            ################################################
+
             if result == TaskResult.SUCCEEDED:
+
                 self.get_logger().info(
                     'Goal achieved! Frontier reached'
                 )
 
                 self.current_goal = None
-
                 self.exploring = False
 
-                # OPTIONAL:
-                # rotate to improve SLAM scan coverage
+                # AprilTag was previously detected
+                if self.tag_pending:
+
+                    self.get_logger().info(
+                        "Frontier reached. Switching to tag mode."
+                    )
+
+                    self.tag_detected = True
+                    self.tag_pending = False
+                    self.get_logger().info(
+                        "AprilTag seen. Will finish current goal first."
+                    )
+
+                    return
+
+                # small rotation for SLAM improvement
                 rotate_twist = Twist()
                 rotate_twist.angular.z = 0.3
+
                 self.cmd_pub.publish(rotate_twist)
-                rclpy.spin_once(self, timeout_sec=0.5)
+
+                rclpy.spin_once(
+                    self,
+                    timeout_sec=0.5
+                )
+
                 self.cmd_pub.publish(Twist())
+
+            ################################################
+            # GOAL FAILED
+            ################################################
 
             elif result == TaskResult.FAILED:
 
@@ -1013,7 +916,11 @@ class Explorer(Node):
                     )
 
                 self.current_goal = None
-                self.exploring= False
+                self.exploring = False
+
+            ################################################
+            # GOAL CANCELED
+            ################################################
 
             elif result == TaskResult.CANCELED:
 
@@ -1024,7 +931,17 @@ class Explorer(Node):
                 self.current_goal = None
                 self.exploring = False
 
- 
+        ####################################################
+        # DON'T SEND NEW GOALS IF TAG WAS SEEN
+        ####################################################
+
+        if self.tag_pending:
+            return
+
+        ####################################################
+        # FRONTIER SEARCH
+        ####################################################
+
         frontiers = self.find_frontiers()
 
         if len(frontiers) < 5:
@@ -1055,12 +972,15 @@ class Explorer(Node):
 
             return
 
+        ####################################################
         # RRT FRONTIER SELECTION
+        ####################################################
 
         best = self.select_rrt_frontier()
+
         if best is None:
-            return     
-   
+            return
+
         robot_pos = self.get_robot_position()
 
         if robot_pos is None:
@@ -1070,13 +990,16 @@ class Explorer(Node):
             robot_pos[0],
             robot_pos[1]
         )
- 
+
         goal = self.create_pose(
             best[0],
             best[1]
         )
 
-        path = self.navigator.getPath(start, goal)
+        path = self.navigator.getPath(
+            start,
+            goal
+        )
 
         if path is None:
 
@@ -1084,11 +1007,13 @@ class Explorer(Node):
                 "Nav2 cannot find a path to this frontier"
             )
 
-            self.failed_goals.append(best)
+            self.failed_goals.append(
+                best
+            )
 
             return
-        
-        # AVOID RESENDING SAME GOAL
+
+        # Avoid resending same goal
         if self.current_goal:
 
             dist = math.hypot(
@@ -1097,10 +1022,106 @@ class Explorer(Node):
             )
 
             if dist < 0.5:
-                return      
-        
-        self.send_goal(best[0], best[1])
+                return
 
+        self.send_goal(
+            best[0],
+            best[1]
+        )   
+    def visual_servo(self):
+
+        self.get_logger().info(
+            f"VISUAL SERVO: tag={self.tag_detected} "
+            f"mission={self.mission_complete} "
+            f"exploring={self.exploring}"
+        )
+
+        if not self.tag_detected:
+            self.get_logger().info("EXIT 1")
+            return
+
+        if self.mission_complete:
+            self.get_logger().info("EXIT 2")
+
+            return
+        self.get_logger().info("ENTER TF")
+        
+        # only run after exploration has stopped
+        if self.exploring:
+            self.get_logger().info("EXIT 3")
+            return
+        
+
+        try:
+
+            tf = self.tf_buffer.lookup_transform(
+                'base_link',
+                'tag36h11:0',
+                rclpy.time.Time()
+            )
+
+            tx = tf.transform.translation.x
+            ty = tf.transform.translation.y
+
+            self.get_logger().info(
+                f"tx={tx:.2f}, ty={ty:.2f}, center={self.tag_center_x}"
+            )
+
+        except TransformException as e:
+
+            self.get_logger().warn(
+                f"TF ERROR: {e}"
+            )
+            self.cmd_pub.publish(Twist())
+            return
+
+        distance = math.sqrt(tx*tx + ty*ty)
+
+        twist = Twist()
+
+        image_center = 160
+
+        error = image_center - self.tag_center_x
+        self.get_logger().info(
+            f"error={error:.1f}"
+        )
+        # CENTER TAG
+        if abs(error) > 20:
+
+            twist.angular.z = 0.003 * error
+
+            self.cmd_pub.publish(twist)
+
+            self.get_logger().info(
+                f"Centering error={error:.1f}"
+            )
+
+            return
+
+        # APPROACH TAG
+        self.get_logger().info(
+            f"distance={distance:.2f}"
+        )
+        if distance > 0.60:
+
+            twist.linear.x = 0.15
+
+            self.cmd_pub.publish(twist)
+
+            self.get_logger().info(
+                f"Distance to tag = {distance:.2f}"
+            )
+
+            return
+
+        # FINISHED
+        self.cmd_pub.publish(Twist())
+
+        self.mission_complete = True
+
+        self.get_logger().info(
+            ">>>>>>>> TAG REACHED <<<<<<<<"
+        )
 
     def map_is_ready(self):
 
